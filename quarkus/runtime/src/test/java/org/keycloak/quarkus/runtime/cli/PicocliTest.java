@@ -124,10 +124,13 @@ public class PicocliTest extends AbstractConfigurationTest {
         assertEquals(CommandLine.ExitCode.OK, nonRunningPicocli.exitCode);
         assertEquals("1h",
                 nonRunningPicocli.config.getConfigValue("quarkus.http.ssl.certificate.reload-period").getValue());
+        assertEquals("1h",
+                nonRunningPicocli.config.getConfigValue("quarkus.management.ssl.certificate.reload-period").getValue());
 
         nonRunningPicocli = pseudoLaunch("start-dev", "--https-certificates-reload-period=-1");
         assertEquals(CommandLine.ExitCode.OK, nonRunningPicocli.exitCode);
         assertNull(nonRunningPicocli.config.getConfigValue("quarkus.http.ssl.certificate.reload-period").getValue());
+        assertNull(nonRunningPicocli.config.getConfigValue("quarkus.management.ssl.certificate.reload-period").getValue());
     }
 
     @Test
@@ -421,6 +424,20 @@ public class PicocliTest extends AbstractConfigurationTest {
 
         NonRunningPicocli nonRunningPicocli = pseudoLaunch("start", "--optimized");
         assertEquals(Integer.MAX_VALUE, nonRunningPicocli.exitCode); // "running" state
+    }
+
+    @Test
+    public void invalidImportRealmArgument() {
+        NonRunningPicocli nonRunningPicocli = pseudoLaunch("start-dev", "--import-realm", "some-file");
+        assertEquals(CommandLine.ExitCode.USAGE, nonRunningPicocli.exitCode);
+        assertTrue(nonRunningPicocli.getErrString(), nonRunningPicocli.getErrString().contains("Unknown option: 'some-file'"));
+    }
+
+    @Test
+    public void invalidImportRealmEqualsArgument() {
+        NonRunningPicocli nonRunningPicocli = pseudoLaunch("start-dev", "--import-realm=some-file");
+        assertEquals(CommandLine.ExitCode.USAGE, nonRunningPicocli.exitCode);
+        assertTrue(nonRunningPicocli.getErrString(), nonRunningPicocli.getErrString().contains("option '--import-realm' should be specified without 'some-file' parameter"));
     }
 
     @Test

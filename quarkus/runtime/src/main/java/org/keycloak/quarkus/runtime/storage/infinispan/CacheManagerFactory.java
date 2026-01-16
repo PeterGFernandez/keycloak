@@ -39,6 +39,7 @@ import org.infinispan.client.hotrod.impl.ConfigurationProperties;
 import org.infinispan.commons.dataconversion.MediaType;
 import org.infinispan.commons.internal.InternalCacheNames;
 import org.infinispan.commons.util.concurrent.CompletableFutures;
+import org.infinispan.configuration.cache.AbstractStoreConfiguration;
 import org.infinispan.configuration.cache.CacheMode;
 import org.infinispan.configuration.cache.ConfigurationBuilder;
 import org.infinispan.configuration.cache.HashConfiguration;
@@ -70,6 +71,7 @@ import org.keycloak.models.sessions.infinispan.query.ClientSessionQueries;
 import org.keycloak.models.sessions.infinispan.query.UserSessionQueries;
 import org.keycloak.models.sessions.infinispan.remote.RemoteInfinispanAuthenticationSessionProviderFactory;
 import org.keycloak.models.sessions.infinispan.remote.RemoteUserLoginFailureProviderFactory;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.quarkus.runtime.configuration.Configuration;
 import org.keycloak.quarkus.runtime.storage.infinispan.jgroups.JGroupsConfigurator;
 
@@ -79,6 +81,7 @@ import static org.keycloak.config.CachingOptions.CACHE_REMOTE_HOST_PROPERTY;
 import static org.keycloak.config.CachingOptions.CACHE_REMOTE_PASSWORD_PROPERTY;
 import static org.keycloak.config.CachingOptions.CACHE_REMOTE_PORT_PROPERTY;
 import static org.keycloak.config.CachingOptions.CACHE_REMOTE_USERNAME_PROPERTY;
+import static org.keycloak.connections.infinispan.InfinispanConnectionProvider.ACTION_TOKEN_CACHE;
 import static org.keycloak.connections.infinispan.InfinispanConnectionProvider.AUTHENTICATION_SESSIONS_CACHE_NAME;
 import static org.keycloak.connections.infinispan.InfinispanConnectionProvider.CLIENT_SESSION_CACHE_NAME;
 import static org.keycloak.connections.infinispan.InfinispanConnectionProvider.CLUSTERED_CACHE_NAMES;
@@ -330,13 +333,59 @@ public class CacheManagerFactory {
             jGroupsConfigurator.configure(session);
             configureCacheMaxCount(builder, CachingOptions.CLUSTERED_MAX_COUNT_CACHES);
             configureSessionsCaches(builder);
+            ensureMinimumOwners(builder);
             validateWorkCacheConfiguration(builder);
         }
         configureCacheMaxCount(builder, CachingOptions.LOCAL_MAX_COUNT_CACHES);
         checkForRemoteStores(builder);
         configureMetrics(builder);
 
-        return new DefaultCacheManager(builder, isStartEagerly());
+        return getDefaultCacheManager(session, builder);
+    }
+
+    private static DefaultCacheManager getDefaultCacheManager(KeycloakSession session, ConfigurationBuilderHolder holder) {
+        if (session == null) {
+            // If there is no session, this is not using JDBC_PING, and therefore we do not need and also can not suspend the JTA transaction context
+            return getDefaultCacheManager(holder);
+        }
+        // This disables the JTA transaction context to avoid binding all JDBC_PING2 interactions to the current transaction
+        DefaultCacheManager[] _cm = new DefaultCacheManager[1];
+        KeycloakModelUtils.suspendJtaTransaction(session.getKeycloakSessionFactory(), () ->
+                _cm[0] = getDefaultCacheManager(holder)
+        );
+        return _cm[0];
+    }
+
+    private static DefaultCacheManager getDefaultCacheManager(ConfigurationBuilderHolder holder) {
+        return new DefaultCacheManager(holder, isStartEagerly());
+    }
+
+    /**
+     * Configures the caches "actionToken", "authenticationSessions", and "loginFailures" with the minimum number of
+     * owners to prevent data loss in a single instance crash.
+     * <p>
+     * The data in those caches only exist in memory, therefore they must have more than one owner configured.
+     *
+     * @param holder The {@link ConfigurationBuilderHolder} where the caches are configured.
+     * @throws IllegalStateException if an Infinispan cache is not defined in the {@code holder}. This could indicate a
+     *                               missing or incorrect configuration.
+     */
+    private static void ensureMinimumOwners(ConfigurationBuilderHolder holder) {
+        for (var name : Arrays.asList(
+                LOGIN_FAILURE_CACHE_NAME,
+                AUTHENTICATION_SESSIONS_CACHE_NAME,
+                ACTION_TOKEN_CACHE)) {
+            var builder = holder.getNamedConfigurationBuilders().get(name);
+            if (builder == null) {
+                throw new IllegalStateException("Infinispan cache '%s' not found. Make sure it is defined in your XML configuration file.".formatted(name));
+            }
+            var hashConfig = builder.clustering().hash();
+            var owners = hashConfig.attributes().attribute(HashConfiguration.NUM_OWNERS).get();
+            if (owners < 2) {
+                logger.infof("Setting num_owners=2 (configured value is %s) for cache '%s' to prevent data loss.", owners, name);
+                hashConfig.numOwners(2);
+            }
+        }
     }
 
     private static void configureMetrics(ConfigurationBuilderHolder holder) {
@@ -474,15 +523,14 @@ public class CacheManagerFactory {
                         configurationBuilder.clustering().hash().numOwners(1);
                     } else {
                         if (configurationBuilder.memory().maxCount() != -1) {
-                            logger.warnf("Persistent user sessions disabled and memory limit found in configuration for cache %s. This might be a misconfiguration! Update your Infinispan configuration to remove this message.", cacheName);
-                        }
-                        if (configurationBuilder.memory().maxCount() == 10000 && (cacheName.equals(USER_SESSION_CACHE_NAME) || cacheName.equals(CLIENT_SESSION_CACHE_NAME))) {
-                            logger.warnf("Persistent user sessions disabled and memory limit is set to default value 10000. Ignoring cache limits to avoid losing sessions for cache %s.", cacheName);
+                            logger.infof("Persistent user sessions disabled and memory limit is set. Ignoring cache limits to avoid losing sessions for cache %s.", cacheName);
                             configurationBuilder.memory().maxCount(-1);
                         }
-                        if (configurationBuilder.clustering().hash().attributes().attribute(HashConfiguration.NUM_OWNERS).get() == 1
-                                && configurationBuilder.persistence().stores().isEmpty()) {
-                            logger.warnf("Number of owners is one for cache %s, and no persistence is configured. This might be a misconfiguration as you will lose data when a single node is restarted!", cacheName);
+                        if (configurationBuilder.clustering().hash().attributes().attribute(HashConfiguration.NUM_OWNERS).get() == 1 &&
+                              configurationBuilder.persistence().stores().stream().noneMatch(p -> p.attributes().attribute(AbstractStoreConfiguration.SHARED).get())
+                        ) {
+                            logger.infof("Persistent user sessions disabled with number of owners set to default value 1 for cache %s and no shared persistence store configured. Setting num_owners=2 to avoid data loss.", cacheName);
+                            configurationBuilder.clustering().hash().numOwners(2);
                         }
                     }
                 });
