@@ -47,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -199,7 +200,14 @@ public class JpaUserSessionPersisterProvider implements UserSessionPersisterProv
         onClientRemoved(client.getId());
     }
 
+    /**
+     * Remove client sessions for a specific client.
+     * <p>
+     * We need to remove the client sessions for clients that are no longer present, as we would otherwise
+     * look up those non-existent clients again and again, and this would be slow as they would never be in the cache.
+     */
     private void onClientRemoved(String clientUUID) {
+        logger.debugf("Client sessions removed for client %s",  clientUUID);
         StorageId clientStorageId = new StorageId(clientUUID);
         if (clientStorageId.isLocal()) {
             em.createNamedQuery("deleteClientSessionsByClient").setParameter("clientId", clientUUID).executeUpdate();
@@ -240,50 +248,34 @@ public class JpaUserSessionPersisterProvider implements UserSessionPersisterProv
     public void removeExpired(RealmModel realm) {
         int expiredOffline = calculateOldestSessionTime(realm, true) - SessionTimeoutHelper.PERIODIC_CLEANER_IDLE_TIMEOUT_WINDOW_SECONDS;
 
-        // prefer client session timeout if set
-        int expiredClientOffline = expiredOffline;
-        if (realm.isOfflineSessionMaxLifespanEnabled() && realm.getClientOfflineSessionIdleTimeout() > 0) {
-            expiredClientOffline = Time.currentTime() - realm.getClientOfflineSessionIdleTimeout() - SessionTimeoutHelper.PERIODIC_CLEANER_IDLE_TIMEOUT_WINDOW_SECONDS;
-        }
-
-        expire(realm, expiredClientOffline, expiredOffline, true);
+        expire(realm, expiredOffline, true);
 
         if (MultiSiteUtils.isPersistentSessionsEnabled()) {
 
             int expired = calculateOldestSessionTime(realm, false) - SessionTimeoutHelper.PERIODIC_CLEANER_IDLE_TIMEOUT_WINDOW_SECONDS;
 
-            // prefer client session timeout if set
-            int expiredClient = expired;
-            if (realm.getClientSessionIdleTimeout() > 0) {
-                expiredClient = Time.currentTime() - realm.getClientSessionIdleTimeout() - SessionTimeoutHelper.PERIODIC_CLEANER_IDLE_TIMEOUT_WINDOW_SECONDS;
-            }
-
-            expire(realm, expiredClient, expired, false);
+            expire(realm, expired, false);
         }
     }
 
     private int calculateOldestSessionTime(RealmModel realm, boolean offline) {
-        if (offline) {
-            return Time.currentTime() - SessionExpirationUtils.getOfflineSessionIdleTimeout(realm);
-        } else {
-            return Time.currentTime() - Math.max(SessionExpirationUtils.getSsoSessionIdleTimeout(realm), realm.getSsoSessionIdleTimeoutRememberMe());
-        }
+        return Time.currentTime() - (int) TimeUnit.MILLISECONDS.toSeconds(SessionExpirationUtils.calculateUserSessionIdleTimestamp(offline, realm.isRememberMe(), 0, realm));
     }
 
-    private void expire(RealmModel realm, int expiredClientOffline, int expiredOffline, boolean offline) {
+    private void expire(RealmModel realm, int expired, boolean offline) {
         String offlineStr = offlineToString(offline);
 
         logger.tracef("Trigger removing expired user sessions for realm '%s'", realm.getName());
 
         int cs = em.createNamedQuery("deleteExpiredClientSessions")
                 .setParameter("realmId", realm.getId())
-                .setParameter("lastSessionRefresh", expiredClientOffline)
+                .setParameter("lastSessionRefresh", expired)
                 .setParameter("offline", offlineStr)
                 .executeUpdate();
 
         int us = em.createNamedQuery("deleteExpiredUserSessions")
                 .setParameter("realmId", realm.getId())
-                .setParameter("lastSessionRefresh", expiredOffline)
+                .setParameter("lastSessionRefresh", expired)
                 .setParameter("offline", offlineStr)
                 .executeUpdate();
 
@@ -559,7 +551,7 @@ public class JpaUserSessionPersisterProvider implements UserSessionPersisterProv
         AuthenticatedClientSessionModel clientSessAdapter = toAdapter(userSession.getRealm(), null, userSession, clientSessionEntity);
 
         if (clientSessAdapter.getClient() == null) {
-            logger.tracef("Not adding client session %s / %s since client is null", userSession, clientSessAdapter);
+            logger.debugf("Not adding client session %s / %s since client is null", userSession, clientSessAdapter);
             return false;
         }
 
@@ -662,6 +654,10 @@ public class JpaUserSessionPersisterProvider implements UserSessionPersisterProv
             }
             // can be null if client is not found anymore
             client = realm.getClientById(clientId);
+            if (client == null) {
+                logger.debugf("Client not found for clientId %s clientStorageProvider %s externalClientId %s",
+                        entity.getClientId(), entity.getClientStorageProvider(), entity.getExternalClientId());
+            }
         }
 
         PersistentClientSessionModel model = new PersistentClientSessionModel() {
