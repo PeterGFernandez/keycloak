@@ -31,6 +31,8 @@ import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.protocols.JDBC_PING2;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.connections.jpa.util.JpaUtils;
+import org.keycloak.jgroups.header.TracerHeader;
+import org.keycloak.jgroups.protocol.OPEN_TELEMETRY;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.quarkus.runtime.storage.infinispan.CacheManagerFactory;
 import org.keycloak.quarkus.runtime.storage.infinispan.jgroups.JGroupsStackConfigurator;
@@ -77,7 +79,10 @@ public class JGroupsJdbcPingStackConfigurator implements JGroupsStackConfigurato
                 "delete_single_sql", String.format("DELETE from %s WHERE address=?", tableName),
                 "insert_single_sql", String.format("INSERT INTO %s values (?, ?, ?, ?, ?)", tableName),
                 "select_all_pingdata_sql", String.format("SELECT address, name, ip, coord FROM %s WHERE cluster_name=?", tableName),
+                // This guarantees cleanup of stale data
                 "remove_all_data_on_view_change", "true",
+                // This guarantees that merging happens even after the info writer completed
+                "write_data_on_find", "true",
                 "register_shutdown_hook", "false",
                 "stack.combine", "REPLACE",
                 "stack.position", discoveryProtocol
@@ -86,6 +91,8 @@ public class JGroupsJdbcPingStackConfigurator implements JGroupsStackConfigurato
         // Use custom Keycloak JDBC_PING implementation that workarounds issue https://issues.redhat.com/browse/JGRP-2870
         // The id 1025 follows this instruction: https://github.com/belaban/JGroups/blob/38219e9ec1c629fa2f7929e3b53d1417d8e60b61/conf/jg-protocol-ids.xml#L85
         ClassConfigurator.addProtocol((short) 1025, KEYCLOAK_JDBC_PING2.class);
+        ClassConfigurator.addProtocol((short) 1026, OPEN_TELEMETRY.class);
+        ClassConfigurator.add(TracerHeader.ID, TracerHeader.class);
         return List.of(new ProtocolConfiguration(KEYCLOAK_JDBC_PING2.class.getName(), attributes));
     }
 

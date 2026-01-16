@@ -1,0 +1,34 @@
+// ------------------------ Notable changes ------------------------ //
+== Notable changes
+
+Notable changes where an internal behavior changed to prevent common misconfigurations, fix bugs or simplify running {project_name}.
+
+=== User sessions created with "Remember Me" are no longer valid if "Remember Me" is disabled for the realm
+
+When the "Remember Me" option is disabled in the realm settings, all user sessions previously created with the "Remember Me" flag are now considered invalid.
+Users will be required to log in again, and any associated refresh tokens will no longer be usable.
+User sessions created without selecting "Remember Me" are not affected.
+
+=== Added database indexes on `OFFLINE_CLIENT_SESSION` table
+
+This adds new indexes on `OFFLINE_CLIENT_SESSION` table to improve performance when retrieving or deleting client sessions.
+
+If those tables contain more than 300000 entries, {project_name} will skip the index creation by default during the automatic schema migration and instead log the SQL statement on the console during migration to be applied manually after {project_name}'s startup.
+See the link:{upgradingguide_link}[{upgradingguide_name}] for details on how to configure a different limit.
+
+=== LDAP referrals filtered to allow only LDAP referrals
+
+LDAP referrals now by default are only allowed to include LDAP URLs.
+This change enhances security and aligns with best practices for LDAP configurations.
+
+This also prevents other JDNI references from being used in case you have written custom extensions.
+To restore the original behavior, set the option `spi-storage--ldap--secure-referral` to `false`.
+When doing this, we recommend to disable LDAP referrals in all LDAP providers.
+
+== Deprecated features
+
+The following sections provide details on deprecated features.
+
+=== Disabling filtering of LDAP referrals
+
+The option `spi-storage--ldap--secure-referral` to disable filtering referrals is deprecated. It will be removed in a future release and filtering will then be enforced.
